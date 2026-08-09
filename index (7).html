@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Help — Request Assistance</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="grid-bg"></div>
+<div class="wrap">
+
+  <div class="nameplate">
+    <div>
+      <span class="tag">Live Support</span>
+      <h1>Request Assistance</h1>
+    </div>
+    <div id="statusText" style="font-size:12px; color:var(--dim);">
+      <span class="status-dot" id="statusDot"></span><span id="statusLabel">Not connected</span>
+    </div>
+  </div>
+
+  <div class="panel" id="requestPanel">
+    <span class="panel-label">Start a session</span>
+    <input type="text" id="nameInput" placeholder="Your name">
+    <textarea id="noteInput" rows="3" placeholder="Brief note — what do you need help with?"></textarea>
+    <button class="primary" id="requestBtn">Request Help</button>
+    <p id="requestMsg" style="font-size:12px; color:var(--dim); margin-top:8px;"></p>
+  </div>
+
+  <div class="panel" id="queuePanel" style="display:none;">
+    <span class="panel-label">Operator busy</span>
+    <p style="font-size:13px; color:var(--paper); margin-bottom:12px;">The operator is on another call right now. Want to wait? We'll keep trying automatically — no need to keep clicking.</p>
+    <button class="primary" id="waitBtn">Wait in Queue</button>
+    <button class="ghost" id="giveUpBtn" style="margin-left:8px;">Never Mind</button>
+  </div>
+
+  <div class="panel" id="waitingPanel" style="display:none;">
+    <span class="panel-label">Waiting</span>
+    <p style="font-size:13px; color:var(--paper);">Retrying every few seconds… <span id="attemptCount">0</span> attempts so far. Keep this tab open.</p>
+    <button class="ghost" id="stopWaitBtn" style="margin-top:10px;">Stop Waiting</button>
+  </div>
+
+  <div id="callPanel" style="display:none;">
+    <div class="panel" id="bgPanel">
+      <span class="panel-label">Background</span>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="ghost" id="bgNoneBtn">None</button>
+        <button class="ghost" id="bgBlurBtn">Blur</button>
+        <button class="ghost" id="bgImageBtn">Image…</button>
+        <input type="file" id="bgFileInput" accept="image/*" style="display:none;">
+      </div>
+    </div>
+
+    <div class="video-stage">
+      <div class="video-box">
+        <video id="remoteVideo" autoplay playsinline></video>
+        <span class="caption">Operator</span>
+      </div>
+      <div class="video-box">
+        <video id="localVideo" autoplay playsinline muted style="display:none;"></video>
+        <canvas id="localCanvas"></canvas>
+        <span class="caption">You</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <span class="panel-label">Text channel</span>
+      <div class="chat-log" id="chatLog"></div>
+      <div style="display:flex; gap:8px;">
+        <input type="text" id="chatInput" placeholder="Type a message…" style="margin-bottom:0;">
+        <button id="sendBtn">Send</button>
+      </div>
+    </div>
+
+    <div class="controls-row">
+      <button id="muteBtn" class="ghost">Mute Mic</button>
+      <button id="cameraBtn" class="ghost">Stop Camera</button>
+      <button id="endBtn" class="danger">End Session</button>
+    </div>
+  </div>
+
+</div>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js"></script>
+<script>
+// IMPORTANT: this must match the fixed ID set in operator.html
+const OPERATOR_ID = 'help-operator-live';
+
+// ---- Virtual background ----
+let bgMode = 'none'; // 'none' | 'blur' | 'image'
+let bgImageEl = null;
+let selfieSeg = null;
+let outStream = null; // canvas.captureStream() — what actually gets sent to peers
+const localVideoEl = document.getElementById('localVideo');
+const localCanvas = document.getElementById('localCanvas');
+const ctx = localCanvas.getContext('2d');
+
+function initSegmentation() {
+  selfieSeg = new SelfieSegmentation({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}`
+  });
+  selfieSeg.setOptions({ modelSelection: 1 });
+  selfieSeg.onResults(onSegResults);
+}
+
+function onSegResults(results) {
+  const w = localCanvas.width = results.image.width;
+  const h = localCanvas.height = results.image.height;
+
+  ctx.save();
+  ctx.clearRect(0, 0, w, h);
+
+  if (bgMode === 'none') {
+    ctx.drawImage(results.image, 0, 0, w, h);
+    ctx.restore();
+    return;
+  }
+
+  // Draw the segmentation mask, then composite person over background
+  ctx.drawImage(results.segmentationMask, 0, 0, w, h);
+  ctx.globalCompositeOperation = 'source-in';
+  ctx.drawImage(results.image, 0, 0, w, h);
+
+  ctx.globalCompositeOperation = 'destination-over';
+  if (bgMode === 'blur') {
+    ctx.filter = 'blur(12px)';
+    ctx.drawImage(results.image, 0, 0, w, h);
+    ctx.filter = 'none';
+  } else if (bgMode === 'image' && bgImageEl) {
+    ctx.drawImage(bgImageEl, 0, 0, w, h);
+  } else {
+    ctx.fillStyle = '#10161F';
+    ctx.fillRect(0, 0, w, h);
+  }
+  ctx.restore();
+}
+
+let segLoopRunning = false;
+async function segLoop() {
+  if (!segLoopRunning) return;
+  if (bgMode === 'none') {
+    // Skip MediaPipe entirely when off — just draw the raw frame, cheaper
+    const w = localCanvas.width = localVideoEl.videoWidth || 640;
+    const h = localCanvas.height = localVideoEl.videoHeight || 480;
+    ctx.drawImage(localVideoEl, 0, 0, w, h);
+  } else {
+    await selfieSeg.send({ image: localVideoEl });
+  }
+  requestAnimationFrame(segLoop);
+}
+
+function startCanvasPipeline(rawStream) {
+  localVideoEl.srcObject = rawStream;
+  localVideoEl.play();
+  if (!selfieSeg) initSegmentation();
+  segLoopRunning = true;
+  requestAnimationFrame(segLoop);
+
+  outStream = localCanvas.captureStream(30);
+  // Carry the mic audio track over onto the outgoing stream
+  rawStream.getAudioTracks().forEach(t => outStream.addTrack(t));
+  return outStream;
+}
+
+document.getElementById('bgNoneBtn').onclick = () => { bgMode = 'none'; };
+document.getElementById('bgBlurBtn').onclick = () => { bgMode = 'blur'; };
+document.getElementById('bgImageBtn').onclick = () => document.getElementById('bgFileInput').click();
+document.getElementById('bgFileInput').onchange = (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const img = new Image();
+  img.onload = () => { bgImageEl = img; bgMode = 'image'; };
+  img.src = URL.createObjectURL(file);
+};
+
+let peer, localStream, mediaConn, dataConn;
+let retryTimer = null;
+let attempts = 0;
+const RETRY_INTERVAL_MS = 8000; // knock-and-wait cadence — keep this polite to the free broker
+
+const statusDot = document.getElementById('statusDot');
+const statusLabel = document.getElementById('statusLabel');
+function setStatus(text, mode) {
+  statusLabel.textContent = text;
+  statusDot.className = 'status-dot' + (mode ? ' ' + mode : '');
+}
+
+function showPanel(id) {
+  ['requestPanel', 'queuePanel', 'waitingPanel', 'callPanel'].forEach(p => {
+    document.getElementById(p).style.display = (p === id) ? 'block' : 'none';
+  });
+}
+
+async function ensureLocalStream() {
+  if (!localStream) {
+    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  }
+  return localStream;
+}
+
+async function attemptCall() {
+  attempts++;
+  document.getElementById('attemptCount').textContent = attempts;
+
+  await ensureLocalStream();
+  if (!outStream) startCanvasPipeline(localStream);
+
+  mediaConn = peer.call(OPERATOR_ID, outStream, {
+    metadata: {
+      name: document.getElementById('nameInput').value.trim() || 'Unnamed',
+      note: document.getElementById('noteInput').value.trim()
+    }
+  });
+  dataConn = peer.connect(OPERATOR_ID);
+  dataConn.on('open', () => setupChat(dataConn));
+
+  let answered = false;
+
+  mediaConn.on('stream', (remoteStream) => {
+    answered = true;
+    stopRetryLoop();
+    document.getElementById('remoteVideo').srcObject = remoteStream;
+    showPanel('callPanel');
+    setStatus('Connected', 'live');
+  });
+  mediaConn.on('close', () => { if (answered) cleanup(); });
+  mediaConn.on('error', () => { /* swallow — retry loop will try again */ });
+
+  // Operator rejects busy calls immediately (incomingCall.close()), and a true
+  // no-answer also needs a timeout — either way, if not answered shortly, retry.
+  setTimeout(() => {
+    if (!answered && retryTimer !== null) {
+      // still in the loop — attemptCall() will fire again on the interval
+    }
+  }, 4000);
+}
+
+function startRetryLoop() {
+  showPanel('waitingPanel');
+  attemptCall(); // try immediately, then on interval
+  retryTimer = setInterval(attemptCall, RETRY_INTERVAL_MS);
+}
+
+function stopRetryLoop() {
+  if (retryTimer) {
+    clearInterval(retryTimer);
+    retryTimer = null;
+  }
+}
+
+document.getElementById('requestBtn').onclick = async () => {
+  const btn = document.getElementById('requestBtn');
+  const msg = document.getElementById('requestMsg');
+  btn.disabled = true;
+  msg.textContent = 'Getting camera/mic access…';
+  setStatus('Connecting…', '');
+
+  try {
+    await ensureLocalStream();
+  } catch (e) {
+    msg.textContent = 'Camera/mic access denied or unavailable. Allow access and try again.';
+    btn.disabled = false;
+    setStatus('Not connected', 'alert');
+    return;
+  }
+
+  peer = new Peer(); // random ID assigned by PeerJS cloud broker
+  peer.on('open', async () => {
+    msg.textContent = 'Calling operator…';
+    await attemptCall();
+
+    // If not connected within 4s of the first try, offer the queue instead of failing outright
+    setTimeout(() => {
+      if (document.getElementById('callPanel').style.display === 'none') {
+        showPanel('queuePanel');
+      }
+    }, 4000);
+  });
+
+  peer.on('error', (err) => {
+    msg.textContent = 'Connection error: ' + err.type;
+    btn.disabled = false;
+    setStatus('Not connected', 'alert');
+  });
+};
+
+document.getElementById('waitBtn').onclick = () => {
+  startRetryLoop();
+};
+
+document.getElementById('giveUpBtn').onclick = () => {
+  cleanup();
+};
+
+document.getElementById('stopWaitBtn').onclick = () => {
+  stopRetryLoop();
+  cleanup();
+};
+
+function setupChat(conn) {
+  conn.on('data', (data) => appendChat('Operator', data, false));
+  document.getElementById('sendBtn').onclick = () => {
+    const input = document.getElementById('chatInput');
+    const text = input.value.trim();
+    if (!text || !conn.open) return;
+    conn.send(text);
+    appendChat('You', text, true);
+    input.value = '';
+  };
+  document.getElementById('chatInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('sendBtn').click();
+  });
+}
+
+function appendChat(who, text, self) {
+  const log = document.getElementById('chatLog');
+  const line = document.createElement('div');
+  line.className = 'chat-line' + (self ? ' self' : '');
+  const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  line.innerHTML = `<span class="who">${who}:</span>${escapeHtml(text)}<span class="t">${time}</span>`;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+document.getElementById('muteBtn').onclick = (e) => {
+  const track = localStream.getAudioTracks()[0];
+  track.enabled = !track.enabled;
+  e.target.textContent = track.enabled ? 'Mute Mic' : 'Unmute Mic';
+};
+document.getElementById('cameraBtn').onclick = (e) => {
+  const track = localStream.getVideoTracks()[0];
+  track.enabled = !track.enabled; // segmentation loop will draw black/frozen frame when off
+  e.target.textContent = track.enabled ? 'Stop Camera' : 'Start Camera';
+};
+document.getElementById('endBtn').onclick = () => {
+  if (mediaConn) mediaConn.close();
+  if (dataConn) dataConn.close();
+  cleanup();
+};
+
+function cleanup() {
+  stopRetryLoop();
+  segLoopRunning = false;
+  if (localStream) localStream.getTracks().forEach(t => t.stop());
+  if (outStream) outStream.getTracks().forEach(t => t.stop());
+  if (peer) peer.destroy();
+  setStatus('Session ended', 'alert');
+  setTimeout(() => location.reload(), 1200);
+}
+</script>
+</body>
+</html>

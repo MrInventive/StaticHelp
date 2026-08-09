@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Help — Start Private Call</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="grid-bg"></div>
+<div class="wrap">
+
+  <div class="nameplate">
+    <div>
+      <span class="tag">Private Session</span>
+      <h1>Start a Call</h1>
+    </div>
+    <div style="font-size:12px; color:var(--dim);">
+      <span class="status-dot" id="statusDot"></span><span id="statusLabel">Registering…</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <span class="panel-label">Your call code</span>
+    <p style="font-size:42px; letter-spacing:0.2em; color:var(--amber); font-weight:700; margin:6px 0 10px;" id="code">----</p>
+    <p style="font-size:12px; color:var(--dim);">Share this code with whoever you want to join. It's a live address, not a password — anyone with it can dial in.</p>
+  </div>
+
+  <div class="video-stage">
+    <div class="video-box">
+      <video id="remoteVideo" autoplay playsinline></video>
+      <span class="caption">Guest</span>
+    </div>
+    <div class="video-box">
+      <video id="localVideo" autoplay playsinline muted></video>
+      <span class="caption">You</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <span class="panel-label">Text channel</span>
+    <div class="chat-log" id="chatLog"></div>
+    <div style="display:flex; gap:8px;">
+      <input type="text" id="chatInput" placeholder="Type a message…" style="margin-bottom:0;">
+      <button id="sendBtn">Send</button>
+    </div>
+  </div>
+
+  <div class="controls-row">
+    <button id="muteBtn" class="ghost">Mute Mic</button>
+    <button id="cameraBtn" class="ghost">Stop Camera</button>
+    <button id="endBtn" class="danger">End Session</button>
+  </div>
+
+</div>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const PREFIX = "help-"; // must match join.html
+const code = Math.random().toString(36).substring(2, 6).toUpperCase();
+document.getElementById('code').textContent = code;
+
+const statusDot = document.getElementById('statusDot');
+const statusLabel = document.getElementById('statusLabel');
+function setStatus(text, mode) {
+  statusLabel.textContent = text;
+  statusDot.className = 'status-dot' + (mode ? ' ' + mode : '');
+}
+
+const peer = new Peer(PREFIX + code);
+let localStream, mediaConn, dataConn;
+
+peer.on('open', () => {
+  setStatus('Waiting for guest…', 'live');
+});
+
+peer.on('call', async (call) => {
+  setStatus('Guest joining…', 'live');
+  mediaConn = call;
+  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  document.getElementById('localVideo').srcObject = localStream;
+  call.answer(localStream);
+  call.on('stream', remoteStream => {
+    document.getElementById('remoteVideo').srcObject = remoteStream;
+    setStatus('Connected', 'live');
+  });
+  call.on('close', cleanup);
+});
+
+peer.on('connection', (conn) => {
+  dataConn = conn;
+  conn.on('open', () => setupChat(conn));
+});
+
+peer.on('error', (err) => {
+  setStatus('Line error', 'alert');
+});
+
+function setupChat(conn) {
+  conn.on('data', (data) => appendChat('Guest', data, false));
+  document.getElementById('sendBtn').onclick = () => {
+    const input = document.getElementById('chatInput');
+    const text = input.value.trim();
+    if (!text || !conn.open) return;
+    conn.send(text);
+    appendChat('You', text, true);
+    input.value = '';
+  };
+  document.getElementById('chatInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('sendBtn').click();
+  });
+}
+
+function appendChat(who, text, self) {
+  const log = document.getElementById('chatLog');
+  const line = document.createElement('div');
+  line.className = 'chat-line' + (self ? ' self' : '');
+  const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  line.innerHTML = `<span class="who">${who}:</span>${escapeHtml(text)}<span class="t">${time}</span>`;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+document.getElementById('muteBtn').onclick = (e) => {
+  const track = localStream.getAudioTracks()[0];
+  track.enabled = !track.enabled;
+  e.target.textContent = track.enabled ? 'Mute Mic' : 'Unmute Mic';
+};
+document.getElementById('cameraBtn').onclick = (e) => {
+  const track = localStream.getVideoTracks()[0];
+  track.enabled = !track.enabled;
+  e.target.textContent = track.enabled ? 'Stop Camera' : 'Start Camera';
+};
+document.getElementById('endBtn').onclick = () => {
+  if (mediaConn) mediaConn.close();
+  if (dataConn) dataConn.close();
+  cleanup();
+};
+
+function cleanup() {
+  if (localStream) localStream.getTracks().forEach(t => t.stop());
+  setStatus('Session ended', 'alert');
+  setTimeout(() => location.reload(), 1200);
+}
+</script>
+</body>
+</html>
